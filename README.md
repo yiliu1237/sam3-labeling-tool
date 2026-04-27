@@ -453,15 +453,5 @@ This project uses SAM 3, which is licensed under the SAM License. See the main S
 ## Acknowledgments
 
 - **Meta AI** for SAM 3 model
-- **FastAPI** team for the excellent framework
+- **FastAPI** team for the framework
 - **React** and **Vite** communities
-
-## Contact & Support
-
-For issues and questions:
-- Open an issue on GitHub
-- Check SAM 3 documentation: https://ai.meta.com/sam3
-
----
-
-**Built with using SAM 3, React, and FastAPI**
