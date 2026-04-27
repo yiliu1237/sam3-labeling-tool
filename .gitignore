@@ -148,6 +148,10 @@ tensorboard/
 .DS_Store
 Thumbs.db
 
+# Local notes
+README_sam3.md
+README_TRAIN.md
+
 # BPE vocabulary files
 *.bpe
 *.vocab
