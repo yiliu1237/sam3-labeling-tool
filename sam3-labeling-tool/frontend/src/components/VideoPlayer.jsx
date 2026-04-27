@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Play, Pause, SkipBack, SkipForward } from 'lucide-react';
 import SegmentationCanvas from './SegmentationCanvas';
 import { getVideoInfo } from '../api/client';
+import { API_BASE_URL } from '../config';
 
 const VideoPlayer = ({ videoId, masks, onPointClick, onBoxDraw, onFrameChange }) => {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -15,8 +16,6 @@ const VideoPlayer = ({ videoId, masks, onPointClick, onBoxDraw, onFrameChange })
   const intervalRef = useRef(null);
   const preloadBuffer = 10; // Preload next 10 frames
   const minBufferSize = 5; // Minimum frames ahead to have loaded before playing
-
-  const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
   // Preload frames ahead of current frame
   const preloadFrames = (startFrame) => {

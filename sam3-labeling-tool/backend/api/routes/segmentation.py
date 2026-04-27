@@ -1,5 +1,5 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from PIL import Image, ImageDraw, ImageFont
 import io
 import numpy as np
@@ -8,6 +8,7 @@ from pathlib import Path
 import zipfile
 import tempfile
 import json
+import uuid
 
 import sys
 import os
@@ -18,14 +19,140 @@ from api.models import (
     RefinePromptRequest,
     VideoSegmentRequest,
     SegmentationResult,
+    BoxFileSegmentationResult,
     Point,
     BBox,
     MaskEditRequest
 )
-from services.sam3_service import get_sam3_service
+from services.sam3_service import get_sam3_service, parse_bounding_box_file
 from services.storage import get_storage_service
 
 router = APIRouter(prefix="/api/segment", tags=["segmentation"])
+
+
+@router.get("/bbox-test", response_class=HTMLResponse, include_in_schema=False)
+async def bbox_test_page():
+    """Minimal browser page for testing image upload + YOLO bbox-file segmentation."""
+    return """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SAM3 BBox Test</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; background: #f7f7f8; color: #111; }
+    .wrap { max-width: 900px; margin: 0 auto; background: #fff; padding: 24px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.08); }
+    h1 { margin-top: 0; }
+    label { display: block; font-weight: 600; margin: 16px 0 8px; }
+    input, button { font: inherit; }
+    input[type="file"], input[type="number"] { width: 100%; }
+    button { margin-top: 20px; padding: 10px 16px; border: 0; border-radius: 8px; background: #0b74de; color: #fff; cursor: pointer; }
+    button:disabled { background: #9bbce0; cursor: wait; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #111; color: #eee; padding: 12px; border-radius: 8px; overflow: auto; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    img { max-width: 100%; border: 1px solid #ddd; border-radius: 8px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>SAM3 YOLO BBox Test</h1>
+    <p>Upload an image, upload a YOLO label file like <code>5 0.464323 0.805556 0.125521 0.203704</code>, then run bbox-only segmentation.</p>
+
+    <label for="imageFile">Image file</label>
+    <input id="imageFile" type="file" accept="image/*" />
+
+    <label for="bboxFile">BBox label file</label>
+    <input id="bboxFile" type="file" accept=".txt,.csv,.json" />
+
+    <label for="threshold">Confidence threshold</label>
+    <input id="threshold" type="number" min="0" max="1" step="0.05" value="0.5" />
+
+    <button id="runBtn">Run Test</button>
+
+    <div class="row">
+      <div>
+        <label>Preview</label>
+        <img id="preview" alt="preview" />
+      </div>
+      <div>
+        <label>Visualization</label>
+        <img id="viz" alt="visualization" />
+      </div>
+    </div>
+
+    <label>Response</label>
+    <pre id="output">Waiting.</pre>
+  </div>
+
+  <script>
+    const imageFile = document.getElementById('imageFile');
+    const bboxFile = document.getElementById('bboxFile');
+    const threshold = document.getElementById('threshold');
+    const runBtn = document.getElementById('runBtn');
+    const output = document.getElementById('output');
+    const preview = document.getElementById('preview');
+    const viz = document.getElementById('viz');
+
+    imageFile.addEventListener('change', () => {
+      const file = imageFile.files[0];
+      if (!file) return;
+      preview.src = URL.createObjectURL(file);
+    });
+
+    runBtn.addEventListener('click', async () => {
+      const image = imageFile.files[0];
+      const bbox = bboxFile.files[0];
+      if (!image || !bbox) {
+        output.textContent = 'Please choose both an image file and a bbox label file.';
+        return;
+      }
+
+      runBtn.disabled = true;
+      output.textContent = 'Uploading image...';
+      viz.removeAttribute('src');
+
+      try {
+        const uploadForm = new FormData();
+        uploadForm.append('file', image);
+
+        const uploadResp = await fetch('/api/segment/upload', {
+          method: 'POST',
+          body: uploadForm,
+        });
+        const uploadData = await uploadResp.json();
+        if (!uploadResp.ok) throw new Error(JSON.stringify(uploadData));
+
+        output.textContent = 'Running bbox segmentation...';
+        const segForm = new FormData();
+        segForm.append('image_id', uploadData.file_id);
+        segForm.append('bbox_file', bbox);
+        segForm.append('confidence_threshold', threshold.value);
+
+        const segResp = await fetch('/api/segment/image/boxes-file', {
+          method: 'POST',
+          body: segForm,
+        });
+        const segData = await segResp.json();
+        output.textContent = JSON.stringify(segData, null, 2);
+        if (!segResp.ok) throw new Error(segData.detail || 'Segmentation failed');
+
+        if (segData.visualization_path) {
+          const parts = segData.visualization_path.split('/data/outputs/');
+          if (parts.length === 2) {
+            viz.src = '/outputs/' + parts[1] + '?t=' + Date.now();
+          }
+        }
+      } catch (err) {
+        output.textContent = String(err);
+      } finally {
+        runBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
+"""
 
 
 @router.post("/upload")
@@ -129,6 +256,67 @@ async def segment_image_with_text(request: TextPromptRequest):
         print(f"ERROR in segment_image_with_text: {str(e)}")
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Segmentation failed: {str(e)}")
+
+
+@router.post("/image/boxes-file", response_model=BoxFileSegmentationResult)
+async def segment_image_with_box_file(
+    image_id: str = Form(...),
+    bbox_file: UploadFile = File(...),
+    confidence_threshold: float = Form(0.5),
+):
+    """Segment one object per provided box and clip each mask to the box area."""
+    try:
+        sam3_service = get_sam3_service()
+        storage = get_storage_service()
+
+        image_path = storage.get_upload_path(image_id)
+        if not image_path:
+            raise HTTPException(status_code=404, detail=f"Image {image_id} not found")
+
+        image = Image.open(image_path).convert("RGB")
+        bbox_content = await bbox_file.read()
+
+        try:
+            box_entries = parse_bounding_box_file(
+                bbox_content,
+                bbox_file.filename or "",
+                image_width=image.width,
+                image_height=image.height,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        result = sam3_service.segment_image_with_boxes(
+            image=image,
+            box_entries=box_entries,
+            image_id=f"{image_id}_boxes",
+            confidence_threshold=confidence_threshold,
+        )
+
+        visualization_filename = (
+            f"{image_id}_bbox_segmentation_{uuid.uuid4().hex[:8]}.png"
+        )
+        visualization_path = storage.outputs_path / visualization_filename
+        result["visualization"].save(visualization_path)
+
+        return {
+            "masks": [mask.astype(int).tolist() for mask in result["masks"]],
+            "boxes": [[float(value) for value in box] for box in result["boxes"]],
+            "predicted_boxes": [
+                [float(value) for value in box] for box in result["predicted_boxes"]
+            ],
+            "scores": [float(score) for score in result["scores"]],
+            "labels": result["labels"],
+            "visualization_path": str(visualization_path),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"BBox file segmentation failed: {str(e)}",
+        )
 
 
 @router.post("/image/refine", response_model=SegmentationResult)
@@ -796,4 +984,3 @@ async def edit_mask(request: MaskEditRequest):
         print(f"ERROR in edit_mask: {str(e)}")
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Mask editing failed: {str(e)}")
-

@@ -1,0 +1,7 @@
+# YOLO format: class_id center_x center_y width height
+# Box 0: centered, medium size
+0 0.500000 0.500000 0.300000 0.300000
+# Box 1: upper-left area
+1 0.250000 0.250000 0.200000 0.200000
+# Box 2: lower-right area
+2 0.750000 0.750000 0.200000 0.200000

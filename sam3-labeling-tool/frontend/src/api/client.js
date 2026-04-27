@@ -1,6 +1,5 @@
 import axios from 'axios';
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+import { API_BASE_URL } from '../config';
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -29,6 +28,22 @@ export const segmentImageWithText = async (imageId, prompt, confidenceThreshold 
     image_id: imageId,
     prompt,
     confidence_threshold: confidenceThreshold,
+  });
+
+  return response.data;
+};
+
+// Segment image with bounding-box file
+export const segmentImageWithBoxFile = async (imageId, bboxFile, confidenceThreshold = 0.5) => {
+  const formData = new FormData();
+  formData.append('image_id', imageId);
+  formData.append('bbox_file', bboxFile);
+  formData.append('confidence_threshold', confidenceThreshold);
+
+  const response = await apiClient.post('/api/segment/image/boxes-file', formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
   });
 
   return response.data;

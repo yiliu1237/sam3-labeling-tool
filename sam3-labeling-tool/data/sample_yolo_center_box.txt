@@ -1,0 +1,3 @@
+# YOLO format: class_id center_x center_y width height
+# Easy visual check: one centered box covering 40% of image width/height.
+0 0.500000 0.500000 0.400000 0.400000

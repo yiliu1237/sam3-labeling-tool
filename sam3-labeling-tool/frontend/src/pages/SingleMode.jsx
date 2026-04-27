@@ -6,9 +6,11 @@ import VideoPlayer from '../components/VideoPlayer';
 import ToolPanel from '../components/ToolPanel';
 import MaskList from '../components/MaskList';
 import useStore from '../store/useStore';
+import { API_BASE_URL } from '../config';
 import {
   uploadFile,
   segmentImageWithText,
+  segmentImageWithBoxFile,
   segmentVideoWithText,
   // refineWithPoints,  // Disabled - Point tool removed
   // refineWithBox,     // Disabled - Box tool removed
@@ -18,8 +20,12 @@ import {
 
 const SingleMode = () => {
   const [imagePreview, setImagePreview] = useState(null);
+  const [segmentationMode, setSegmentationMode] = useState('text');
+  const [bboxFile, setBboxFile] = useState(null);
+  const [bboxPreviewBoxes, setBboxPreviewBoxes] = useState([]);
 
   const {
+    currentFile,
     currentFileId,
     currentFileType,
     setCurrentFile,
@@ -43,10 +49,98 @@ const SingleMode = () => {
     clearHistory,
   } = useStore();
 
+  const loadImageSize = (file) => new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new window.Image();
+
+    img.onload = () => {
+      resolve({ width: img.width, height: img.height });
+      URL.revokeObjectURL(objectUrl);
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('Failed to read image size'));
+    };
+
+    img.src = objectUrl;
+  });
+
+  const parseYoloPreviewBoxes = (content, imageWidth, imageHeight) => {
+    const boxes = [];
+
+    content.split(/\r?\n/).forEach((line, index) => {
+      const stripped = line.trim();
+      if (!stripped || stripped.startsWith('#')) {
+        return;
+      }
+
+      const parts = stripped.split(/\s+/);
+      if (parts.length !== 5) {
+        throw new Error(`Line ${index + 1} must contain exactly 5 YOLO values`);
+      }
+
+      const [classId, cxRaw, cyRaw, wRaw, hRaw] = parts;
+      const cx = Number(cxRaw);
+      const cy = Number(cyRaw);
+      const width = Number(wRaw);
+      const height = Number(hRaw);
+
+      if ([cx, cy, width, height].some((value) => Number.isNaN(value))) {
+        throw new Error(`Line ${index + 1} contains non-numeric YOLO values`);
+      }
+
+      if ([cx, cy, width, height].some((value) => value < 0 || value > 1)) {
+        throw new Error(`Line ${index + 1} must use normalized YOLO values in [0, 1]`);
+      }
+
+      boxes.push({
+        label: classId,
+        x1: (cx - (width / 2)) * imageWidth,
+        y1: (cy - (height / 2)) * imageHeight,
+        x2: (cx + (width / 2)) * imageWidth,
+        y2: (cy + (height / 2)) * imageHeight,
+      });
+    });
+
+    return boxes;
+  };
+
+  const handleBboxFileChange = async (file) => {
+    setBboxFile(file);
+
+    if (!file) {
+      setBboxPreviewBoxes([]);
+      return;
+    }
+
+    if (!currentFile) {
+      addToast('Please upload an image first', 'error');
+      setBboxPreviewBoxes([]);
+      return;
+    }
+
+    try {
+      const [content, imageSize] = await Promise.all([
+        file.text(),
+        loadImageSize(currentFile),
+      ]);
+      const parsedBoxes = parseYoloPreviewBoxes(content, imageSize.width, imageSize.height);
+      setBboxPreviewBoxes(parsedBoxes);
+      addToast(`Loaded ${parsedBoxes.length} YOLO boxes`, 'success');
+    } catch (error) {
+      console.error('BBox preview parse error:', error);
+      setBboxPreviewBoxes([]);
+      addToast(error.message || 'Failed to read YOLO bbox file', 'error');
+    }
+  };
+
   // Handle file selection
   const handleFileSelect = async (file) => {
     try {
       setIsLoading(true);
+      setBboxPreviewBoxes([]);
+      setBboxFile(null);
 
       // Upload file first
       const result = await uploadFile(file);
@@ -55,7 +149,6 @@ const SingleMode = () => {
       // Create preview based on file type
       if (result.file_type === 'video') {
         // For videos, fetch the first frame as preview
-        const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
         const frameUrl = `${API_BASE_URL}/api/segment/video/frame/${result.file_id}?frame_index=0`;
         setImagePreview(frameUrl);
         addToast('Video uploaded successfully', 'success');
@@ -77,8 +170,8 @@ const SingleMode = () => {
 
   // Handle text segmentation
   const handleSegment = async () => {
-    if (!currentFileId || !textPrompt.trim()) {
-      addToast('Please upload a file and enter a prompt', 'error');
+    if (!currentFileId) {
+      addToast('Please upload a file first', 'error');
       return;
     }
 
@@ -87,6 +180,10 @@ const SingleMode = () => {
 
       let result;
       if (currentFileType === 'video') {
+        if (!textPrompt.trim()) {
+          addToast('Please enter a prompt for video segmentation', 'error');
+          return;
+        }
         // Use video segmentation API
         result = await segmentVideoWithText(
           currentFileId,
@@ -96,13 +193,30 @@ const SingleMode = () => {
         );
         addToast(`Found ${result.masks?.length || 0} instances in video`, 'success');
       } else {
-        // Use image segmentation API
-        result = await segmentImageWithText(
-          currentFileId,
-          textPrompt,
-          confidenceThreshold
-        );
-        addToast(`Found ${result.masks?.length || 0} instances`, 'success');
+        if (segmentationMode === 'bbox-file') {
+          if (!bboxFile) {
+            addToast('Please choose a YOLO bbox label file', 'error');
+            return;
+          }
+          result = await segmentImageWithBoxFile(
+            currentFileId,
+            bboxFile,
+            confidenceThreshold
+          );
+          addToast(`Processed ${result.masks?.length || 0} bounding boxes`, 'success');
+        } else {
+          if (!textPrompt.trim()) {
+            addToast('Please enter a text prompt', 'error');
+            return;
+          }
+          // Use image segmentation API
+          result = await segmentImageWithText(
+            currentFileId,
+            textPrompt,
+            confidenceThreshold
+          );
+          addToast(`Found ${result.masks?.length || 0} instances`, 'success');
+        }
       }
 
       setSegmentationResult(result);
@@ -333,6 +447,9 @@ const SingleMode = () => {
     clearCurrentFile();
     setImagePreview(null);
     setTextPrompt('');
+    setBboxFile(null);
+    setBboxPreviewBoxes([]);
+    setSegmentationMode('text');
     // clearRefinementPoints();  // Disabled - Point tool removed
     clearHistory();
   };
@@ -376,6 +493,19 @@ const SingleMode = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [undo, redo, canUndo, canRedo, addToast]);
 
+  const isSegmentDisabled = (() => {
+    if (isLoading || !currentFileId) {
+      return true;
+    }
+    if (currentFileType === 'video') {
+      return !textPrompt.trim();
+    }
+    if (segmentationMode === 'bbox-file') {
+      return !bboxFile;
+    }
+    return !textPrompt.trim();
+  })();
+
   return (
     <div className="max-w-7xl mx-auto">
       <div className="mb-6">
@@ -383,7 +513,7 @@ const SingleMode = () => {
           Single Image/Video Segmentation
         </h2>
         <p className="text-gray-600 dark:text-gray-400">
-          Upload an image or video, provide a text prompt, and refine with interactive tools
+          Upload an image or video, then segment with text or a YOLO bbox label file
         </p>
       </div>
 
@@ -396,19 +526,76 @@ const SingleMode = () => {
             <>
               {/* Prompt input */}
               <div className="card p-4">
-                <div className="flex space-x-2">
-                  <input
-                    type="text"
-                    value={textPrompt}
-                    onChange={(e) => setTextPrompt(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSegment()}
-                    placeholder="Enter text prompt (e.g., 'leaf, crack' for multiple)..."
-                    className="input flex-1"
-                    disabled={isLoading}
-                  />
+                {currentFileType === 'image' && (
+                  <div className="mb-4">
+                    <div className="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setSegmentationMode('text')}
+                        className={`px-4 py-2 text-sm font-medium transition-colors ${
+                          segmentationMode === 'text'
+                            ? 'bg-primary-600 text-white'
+                            : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300'
+                        }`}
+                      >
+                        Text Prompt
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSegmentationMode('bbox-file')}
+                        className={`px-4 py-2 text-sm font-medium transition-colors ${
+                          segmentationMode === 'bbox-file'
+                            ? 'bg-primary-600 text-white'
+                            : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300'
+                        }`}
+                      >
+                        YOLO BBox File
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {currentFileType === 'image' && segmentationMode === 'bbox-file' ? (
+                  <div className="space-y-3">
+                    <input
+                      type="file"
+                      accept=".txt,.csv,.json"
+                      onChange={(e) => handleBboxFileChange(e.target.files?.[0] || null)}
+                      className="input"
+                      disabled={isLoading}
+                    />
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      Accepts YOLO label files like <code>5 0.464323 0.805556 0.125521 0.203704</code>
+                    </p>
+                    {bboxFile && (
+                      <div className="text-sm text-gray-700 dark:text-gray-300 space-y-1">
+                        <p>
+                          Selected bbox file: <span className="font-medium">{bboxFile.name}</span>
+                        </p>
+                        <p>
+                          Preview boxes: <span className="font-medium">{bboxPreviewBoxes.length}</span>
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex space-x-2">
+                    <input
+                      type="text"
+                      value={textPrompt}
+                      onChange={(e) => setTextPrompt(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleSegment()}
+                      placeholder="Enter text prompt (e.g., 'leaf, crack' for multiple)..."
+                      className="input flex-1"
+                      disabled={isLoading}
+                    />
+                  </div>
+                )}
+
+                <div className="mt-4">
                   <button
                     onClick={handleSegment}
-                    disabled={isLoading || !textPrompt.trim()}
+                    disabled={isSegmentDisabled}
                     className="btn-primary flex items-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {isLoading ? (
@@ -419,7 +606,11 @@ const SingleMode = () => {
                     ) : (
                       <>
                         <Sparkles size={18} />
-                        <span>Segment</span>
+                        <span>
+                          {currentFileType === 'image' && segmentationMode === 'bbox-file'
+                            ? 'Segment From BBox File'
+                            : 'Segment'}
+                        </span>
                       </>
                     )}
                   </button>
@@ -438,6 +629,7 @@ const SingleMode = () => {
                 <SegmentationCanvas
                   imageUrl={imagePreview}
                   masks={segmentationResult?.masks}
+                  previewBoxes={currentFileType === 'image' && segmentationMode === 'bbox-file' ? bboxPreviewBoxes : []}
                   // onPointClick={handlePointClick}  // Disabled - Point tool removed
                   // onBoxDraw={handleBoxDraw}         // Disabled - Box tool removed
                   onBrushStroke={handleBrushStroke}

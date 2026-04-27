@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 import os
 
 from .routes import segmentation, batch, export
+from services.storage import get_storage_service
 
 # Create FastAPI app
 app = FastAPI(
@@ -15,7 +16,14 @@ app = FastAPI(
 # CORS middleware - allow frontend to connect
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],  # React dev servers
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -25,6 +33,10 @@ app.add_middleware(
 app.include_router(segmentation.router)
 app.include_router(batch.router)
 app.include_router(export.router)
+
+# Expose generated output images for simple browser-based testing.
+storage = get_storage_service()
+app.mount("/outputs", StaticFiles(directory=str(storage.outputs_path)), name="outputs")
 
 
 @app.get("/")

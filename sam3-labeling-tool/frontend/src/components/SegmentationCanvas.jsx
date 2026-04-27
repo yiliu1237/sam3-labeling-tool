@@ -1,8 +1,15 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { Stage, Layer, Image as KonvaImage, Circle, Rect, Shape, Line } from 'react-konva';
+import { Stage, Layer, Image as KonvaImage, Circle, Rect, Shape, Line, Text as KonvaText } from 'react-konva';
 import useStore from '../store/useStore';
 
-const SegmentationCanvas = ({ imageUrl, masks, onPointClick, onBoxDraw, onBrushStroke }) => {
+const SegmentationCanvas = ({
+  imageUrl,
+  masks,
+  previewBoxes = [],
+  onPointClick,
+  onBoxDraw,
+  onBrushStroke
+}) => {
   console.log('🔵 SegmentationCanvas render - masks:', masks ? masks.length : 'null');
 
   const stageRef = useRef(null);
@@ -357,6 +364,47 @@ const SegmentationCanvas = ({ imageUrl, masks, onPointClick, onBoxDraw, onBrushS
     ));
   };
 
+  const renderPreviewBoxes = () => {
+    if (!image || !previewBoxes || previewBoxes.length === 0) return null;
+
+    const scaleX = dimensions.width / image.width;
+    const scaleY = dimensions.height / image.height;
+    const boxColors = ['#ff4d4f', '#52c41a', '#1677ff', '#fa8c16', '#13c2c2', '#eb2f96'];
+
+    return previewBoxes.flatMap((box, idx) => {
+      const color = boxColors[idx % boxColors.length];
+      const x = box.x1 * scaleX;
+      const y = box.y1 * scaleY;
+      const width = (box.x2 - box.x1) * scaleX;
+      const height = (box.y2 - box.y1) * scaleY;
+      const label = box.label ?? `${idx}`;
+
+      return [
+        <Rect
+          key={`preview-box-${idx}`}
+          x={x}
+          y={y}
+          width={width}
+          height={height}
+          stroke={color}
+          strokeWidth={2}
+          dash={[8, 4]}
+          listening={false}
+        />,
+        <KonvaText
+          key={`preview-label-${idx}`}
+          x={x + 4}
+          y={Math.max(2, y - 18)}
+          text={String(label)}
+          fontSize={14}
+          fontStyle="bold"
+          fill={color}
+          listening={false}
+        />
+      ];
+    });
+  };
+
   return (
     <div className="card p-4">
       <Stage
@@ -382,6 +430,7 @@ const SegmentationCanvas = ({ imageUrl, masks, onPointClick, onBoxDraw, onBrushS
               height={dimensions.height}
             />
           )}
+          {renderPreviewBoxes()}
           {renderMasks()}
           {renderPoints()}
           {drawingBox && (

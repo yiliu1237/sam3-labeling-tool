@@ -236,6 +236,7 @@ Downloaded results include binary mask images for each instance, bounding box co
 
 - `POST /api/segment/upload` - Upload image or video file
 - `POST /api/segment/image/text` - Segment image using text prompt
+- `POST /api/segment/image/boxes-file` - Segment image from a bounding-box file and clip masks to each box
 - `POST /api/segment/image/edit-mask` - Edit mask using brush/eraser strokes
 - `POST /api/segment/video/text` - Segment video using text prompt
 - `GET /api/segment/video/frame/{file_id}` - Retrieve video frame
@@ -260,6 +261,46 @@ Edit `backend/api/main.py` to configure:
 - CORS origins
 - Upload limits
 - Storage paths
+
+## Bounding Box File Input
+
+`POST /api/segment/image/boxes-file` accepts an uploaded bbox file plus an already-uploaded `image_id`.
+The backend will:
+
+- Draw the provided boxes on the image
+- Run one SAM 3 box-prompted segmentation per box
+- Clip each output mask so pixels outside that box are forced to `0`
+- Save a visualization image under `sam3-labeling-tool/data/outputs/`
+
+Accepted bbox file formats:
+
+```json
+[
+  {"x1": 120, "y1": 80, "x2": 360, "y2": 420, "label": "object_a"},
+  {"x": 420, "y": 100, "w": 140, "h": 220, "label": "object_b"}
+]
+```
+
+Or plain text / CSV:
+
+```text
+120 80 360 420 object_a
+420,100,560,320,object_b
+```
+
+YOLO label files are also supported directly in the standard format:
+
+```text
+5 0.464323 0.805556 0.125521 0.203704
+```
+
+This is interpreted as:
+
+```text
+class_id center_x center_y width height
+```
+
+where `center_x`, `center_y`, `width`, and `height` are normalized to the uploaded image size.
 
 ### Frontend Settings
 

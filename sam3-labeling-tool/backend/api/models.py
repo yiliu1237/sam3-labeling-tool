@@ -59,6 +59,15 @@ class SegmentationResult(BaseModel):
     labels: Optional[List[str]] = None
 
 
+class BoxFileSegmentationResult(BaseModel):
+    masks: List[List[List[int]]]  # One clipped mask per input box
+    boxes: List[List[float]]  # Input bounding boxes [x1, y1, x2, y2]
+    predicted_boxes: List[List[float]]  # Best SAM3-predicted box per input box
+    scores: List[float]
+    labels: List[str]
+    visualization_path: str
+
+
 class BatchJobStatus(BaseModel):
     job_id: str
     status: str  # pending, processing, completed, failed
