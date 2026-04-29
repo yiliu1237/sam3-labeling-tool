@@ -33,10 +33,10 @@ async def create_batch_job(
         job_id = processor.create_job(
             input_folder=request.input_folder,
             output_folder=request.output_folder,
+            label_folder=request.label_folder,
             prompts=request.prompts,
             confidence_threshold=request.confidence_threshold,
-            export_format=request.export_format,
-            process_videos=request.process_videos
+            process_videos=request.process_videos,
         )
 
         # Add processing to background tasks

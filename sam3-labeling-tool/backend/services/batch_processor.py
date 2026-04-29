@@ -1,62 +1,99 @@
 import os
-import json
 import uuid
-from pathlib import Path
-from typing import List, Dict, Any
-from PIL import Image
 import numpy as np
+import cv2
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+from PIL import Image, ImageDraw
 from datetime import datetime
 
-from .sam3_service import get_sam3_service
+from .sam3_service import get_sam3_service, parse_bounding_box_file
 from .storage import get_storage_service
+
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
+VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov'}
+
+COLORS = [
+    (255, 56,  56),
+    (255, 157, 151),
+    (255, 112, 31),
+    (255, 178, 29),
+    (207, 210, 49),
+    (72,  249, 10),
+    (146, 204, 23),
+    (61,  219, 134),
+    (26,  147, 52),
+    (0,   212, 187),
+    (44,  153, 168),
+    (0,   194, 255),
+    (52,  69,  147),
+    (100, 115, 255),
+    (0,   24,  236),
+    (132, 56,  255),
+    (82,  0,   133),
+    (203, 56,  255),
+    (255, 149, 200),
+    (255, 55,  199),
+]
+
+
+def _mask_to_yolo_seg(mask: np.ndarray, class_id: int, img_w: int, img_h: int) -> Optional[str]:
+    """Convert a binary mask to a YOLO segmentation line."""
+    mask_uint8 = (mask > 0).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    # Use the largest contour
+    contour = max(contours, key=cv2.contourArea)
+    if len(contour) < 3:
+        return None
+    points = contour.reshape(-1, 2)
+    # Normalize
+    norm = points / np.array([img_w, img_h], dtype=np.float32)
+    norm = np.clip(norm, 0.0, 1.0)
+    coords = ' '.join(f'{x:.6f} {y:.6f}' for x, y in norm)
+    return f'{class_id} {coords}'
+
+
+def _draw_overlay(image: Image.Image, masks: List[np.ndarray], alpha: float = 0.45) -> Image.Image:
+    """Draw semi-transparent colored masks over the image."""
+    overlay = image.convert('RGBA')
+    for idx, mask in enumerate(masks):
+        color = COLORS[idx % len(COLORS)]
+        layer = Image.new('RGBA', overlay.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(layer)
+        mask_bool = mask > 0
+        ys, xs = np.where(mask_bool)
+        if len(xs) == 0:
+            continue
+        for x, y in zip(xs, ys):
+            draw.point((int(x), int(y)), fill=(*color, int(255 * alpha)))
+        overlay = Image.alpha_composite(overlay, layer)
+    return overlay.convert('RGB')
 
 
 class BatchProcessor:
-    """Handle batch processing of images and videos"""
 
     def __init__(self):
-        self.sam3_service = get_sam3_service()
-        self.storage_service = get_storage_service()
-        self.jobs = {}  # job_id -> job_info
+        self.jobs: Dict[str, Any] = {}
 
     def create_job(
         self,
         input_folder: str,
         output_folder: str,
+        label_folder: Optional[str],
         prompts: List[str],
-        confidence_threshold: float = 0.5,
-        export_format: str = "coco",
-        process_videos: bool = False
+        confidence_threshold: float,
+        process_videos: bool,
     ) -> str:
-        """
-        Create a batch processing job
-
-        Args:
-            input_folder: Path to input folder
-            output_folder: Path to output folder
-            prompts: List of text prompts
-            confidence_threshold: Minimum confidence score
-            export_format: Export format (coco, mask_png, both)
-            process_videos: Whether to process videos
-
-        Returns:
-            Job ID
-        """
         job_id = str(uuid.uuid4())
+        extensions = IMAGE_EXTENSIONS | (VIDEO_EXTENSIONS if process_videos else set())
+        files = [
+            str(p) for p in Path(input_folder).iterdir()
+            if p.suffix.lower() in extensions
+        ]
+        files.sort()
 
-        # Get files to process
-        extensions = ['.jpg', '.jpeg', '.png', '.bmp']
-        if process_videos:
-            extensions.extend(['.mp4', '.avi', '.mov'])
-
-        files = self.storage_service.get_files_in_folder(input_folder, extensions)
-
-        # Create output folder
-        output_path = self.storage_service.create_output_folder(
-            f"batch_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        )
-
-        # Store job info
         self.jobs[job_id] = {
             'job_id': job_id,
             'status': 'pending',
@@ -66,136 +103,114 @@ class BatchProcessor:
             'current_file': None,
             'error': None,
             'input_folder': input_folder,
-            'output_folder': output_path,
+            'output_folder': output_folder,
+            'label_folder': label_folder,
             'prompts': prompts,
             'confidence_threshold': confidence_threshold,
-            'export_format': export_format,
             'files': files,
-            'results': []
         }
-
         return job_id
 
     def process_job(self, job_id: str):
-        """
-        Process a batch job
-
-        Args:
-            job_id: Job ID
-        """
         if job_id not in self.jobs:
-            raise ValueError(f"Job {job_id} not found")
+            raise ValueError(f'Job {job_id} not found')
 
         job = self.jobs[job_id]
         job['status'] = 'processing'
 
-        files = job['files']
-        prompts = job['prompts']
-        output_folder = job['output_folder']
-        confidence_threshold = job['confidence_threshold']
-        export_format = job['export_format']
+        output_dir = Path(job['output_folder'])
+        masks_dir   = output_dir / 'masks'
+        overlays_dir = output_dir / 'overlays'
+        labels_dir  = output_dir / 'labels'
+        for d in (masks_dir, overlays_dir, labels_dir):
+            d.mkdir(parents=True, exist_ok=True)
 
-        coco_annotations = {
-            'images': [],
-            'annotations': [],
-            'categories': []
-        }
-
-        # Create categories from prompts
-        for idx, prompt in enumerate(prompts):
-            coco_annotations['categories'].append({
-                'id': idx + 1,
-                'name': prompt,
-                'supercategory': 'object'
-            })
-
-        annotation_id = 1
+        sam3 = get_sam3_service()
+        use_boxes = bool(job['label_folder'])
 
         try:
-            for file_idx, file_path in enumerate(files):
-                job['current_file'] = os.path.basename(file_path)
+            for file_idx, file_path in enumerate(job['files']):
+                stem = Path(file_path).stem
+                job['current_file'] = Path(file_path).name
 
-                # Load image
                 image = Image.open(file_path).convert('RGB')
-                image_id = f"batch_{file_idx}"
+                img_w, img_h = image.size
+                image_id = f'batch_{job_id}_{file_idx}'
 
-                # Add to COCO images
-                coco_annotations['images'].append({
-                    'id': file_idx,
-                    'file_name': os.path.basename(file_path),
-                    'width': image.width,
-                    'height': image.height
-                })
+                masks: List[np.ndarray] = []
+                class_ids: List[int] = []
 
-                # Process each prompt
-                for prompt_idx, prompt in enumerate(prompts):
-                    try:
-                        # Segment with SAM 3
-                        result = self.sam3_service.segment_image_with_text(
-                            image=image,
-                            prompt=prompt,
-                            image_id=image_id,
-                            confidence_threshold=confidence_threshold
-                        )
-
-                        # Save results
-                        masks = result['masks']
-                        boxes = result['boxes']
-                        scores = result['scores']
-
-                        # Save masks if requested
-                        if export_format in ['mask_png', 'both']:
-                            mask_folder = os.path.join(output_folder, 'masks', prompt)
-                            os.makedirs(mask_folder, exist_ok=True)
-
-                            for mask_idx, mask in enumerate(masks):
-                                mask_filename = f"{Path(file_path).stem}_{prompt}_{mask_idx}.png"
-                                mask_path = os.path.join(mask_folder, mask_filename)
-
-                                # Save mask
-                                mask_array = np.array(mask)
-                                mask_image = Image.fromarray((mask_array * 255).astype('uint8'))
-                                mask_image.save(mask_path)
-
-                        # Add to COCO annotations
-                        if export_format in ['coco', 'both']:
-                            for mask_idx, (mask, box, score) in enumerate(zip(masks, boxes, scores)):
-                                # Convert mask to RLE or polygon (simplified here)
-                                mask_array = np.array(mask)
-
-                                # Get bounding box
-                                x1, y1, x2, y2 = box
-                                width = x2 - x1
-                                height = y2 - y1
-
-                                coco_annotations['annotations'].append({
-                                    'id': annotation_id,
-                                    'image_id': file_idx,
-                                    'category_id': prompt_idx + 1,
-                                    'bbox': [float(x1), float(y1), float(width), float(height)],
-                                    'area': float(width * height),
-                                    'iscrowd': 0,
-                                    'score': float(score)
-                                })
-
-                                annotation_id += 1
-
-                        # Clear state to free memory
-                        self.sam3_service.clear_image_state(image_id)
-
-                    except Exception as e:
-                        print(f"Error processing {file_path} with prompt '{prompt}': {e}")
+                if use_boxes:
+                    # --- box-prompted mode ---
+                    label_path = Path(job['label_folder']) / f'{stem}.txt'
+                    if not label_path.exists():
+                        job['processed_files'] = file_idx + 1
+                        job['progress'] = (file_idx + 1) / max(job['total_files'], 1)
                         continue
 
-                # Update progress
-                job['processed_files'] = file_idx + 1
-                job['progress'] = (file_idx + 1) / job['total_files']
+                    with open(label_path, 'rb') as f:
+                        box_entries = parse_bounding_box_file(
+                            f.read(), label_path.name, img_w, img_h
+                        )
 
-            # Save COCO annotations
-            if export_format in ['coco', 'both']:
-                coco_path = os.path.join(output_folder, 'annotations.json')
-                with open(coco_path, 'w') as f:
-                    json.dump(coco_annotations, f, indent=2)
+                    result = sam3.segment_image_with_boxes(
+                        image=image,
+                        box_entries=box_entries,
+                        image_id=image_id,
+                        confidence_threshold=job['confidence_threshold'],
+                    )
+                    masks = result['masks']
+                    class_ids = [
+                        int(e.get('label', 0)) if str(e.get('label', '0')).isdigit() else 0
+                        for e in box_entries
+                    ]
+
+                else:
+                    # --- text-prompted mode ---
+                    for prompt_idx, prompt in enumerate(job['prompts']):
+                        result = sam3.segment_image_with_text(
+                            image=image,
+                            prompt=prompt,
+                            image_id=f'{image_id}_{prompt_idx}',
+                            confidence_threshold=job['confidence_threshold'],
+                        )
+                        for m in result['masks']:
+                            masks.append(m.cpu().numpy() if hasattr(m, 'cpu') else np.array(m))
+                            class_ids.append(prompt_idx)
+                        sam3.clear_image_state(f'{image_id}_{prompt_idx}')
+
+                if not masks:
+                    job['processed_files'] = file_idx + 1
+                    job['progress'] = (file_idx + 1) / max(job['total_files'], 1)
+                    continue
+
+                # --- save mask PNG (combined) ---
+                combined = np.zeros((img_h, img_w), dtype=np.uint8)
+                for m in masks:
+                    arr = m.cpu().numpy() if hasattr(m, 'cpu') else np.array(m)
+                    combined = np.maximum(combined, (arr > 0).astype(np.uint8) * 255)
+                Image.fromarray(combined).save(masks_dir / f'{stem}_mask.png')
+
+                # --- save overlay PNG ---
+                mask_arrays = []
+                for m in masks:
+                    arr = m.cpu().numpy() if hasattr(m, 'cpu') else np.array(m)
+                    mask_arrays.append((arr > 0).astype(np.uint8))
+                overlay = _draw_overlay(image, mask_arrays)
+                overlay.save(overlays_dir / f'{stem}_overlay.png')
+
+                # --- save YOLO seg txt ---
+                yolo_lines = []
+                for m, cid in zip(mask_arrays, class_ids):
+                    line = _mask_to_yolo_seg(m, cid, img_w, img_h)
+                    if line:
+                        yolo_lines.append(line)
+                if yolo_lines:
+                    (labels_dir / f'{stem}.txt').write_text('\n'.join(yolo_lines) + '\n')
+
+                sam3.clear_image_state(image_id)
+                job['processed_files'] = file_idx + 1
+                job['progress'] = (file_idx + 1) / max(job['total_files'], 1)
 
             job['status'] = 'completed'
             job['progress'] = 1.0
@@ -203,15 +218,12 @@ class BatchProcessor:
         except Exception as e:
             job['status'] = 'failed'
             job['error'] = str(e)
-            print(f"Batch job {job_id} failed: {e}")
+            import traceback; traceback.print_exc()
 
     def get_job_status(self, job_id: str) -> Dict[str, Any]:
-        """Get job status"""
         if job_id not in self.jobs:
-            raise ValueError(f"Job {job_id} not found")
-
+            raise ValueError(f'Job {job_id} not found')
         job = self.jobs[job_id]
-
         return {
             'job_id': job['job_id'],
             'status': job['status'],
@@ -219,16 +231,14 @@ class BatchProcessor:
             'total_files': job['total_files'],
             'processed_files': job['processed_files'],
             'current_file': job['current_file'],
-            'error': job['error']
+            'error': job['error'],
         }
 
 
-# Global instance
 _batch_processor = None
 
 
 def get_batch_processor() -> BatchProcessor:
-    """Get or create BatchProcessor singleton"""
     global _batch_processor
     if _batch_processor is None:
         _batch_processor = BatchProcessor()

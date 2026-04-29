@@ -93,9 +93,9 @@ export const createBatchJob = async (inputFolder, outputFolder, prompts, options
   const response = await apiClient.post('/api/batch/process', {
     input_folder: inputFolder,
     output_folder: outputFolder,
+    label_folder: options.labelFolder || null,
     prompts,
     confidence_threshold: options.confidenceThreshold || 0.5,
-    export_format: options.exportFormat || 'coco',
     process_videos: options.processVideos || false,
   });
 

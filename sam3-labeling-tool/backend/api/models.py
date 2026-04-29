@@ -46,9 +46,9 @@ class VideoSegmentRequest(BaseModel):
 class BatchProcessRequest(BaseModel):
     input_folder: str
     output_folder: str
-    prompts: List[str]
+    label_folder: Optional[str] = None
+    prompts: List[str] = []
     confidence_threshold: Optional[float] = 0.5
-    export_format: str = Field("coco", description="coco, mask_png, or both")
     process_videos: bool = False
 
 
