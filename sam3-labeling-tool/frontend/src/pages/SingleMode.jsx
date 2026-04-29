@@ -11,6 +11,7 @@ import {
   uploadFile,
   segmentImageWithText,
   segmentImageWithBoxFile,
+  segmentImageWithSegFile,
   segmentVideoWithText,
   // refineWithPoints,  // Disabled - Point tool removed
   // refineWithBox,     // Disabled - Box tool removed
@@ -23,6 +24,8 @@ const SingleMode = () => {
   const [segmentationMode, setSegmentationMode] = useState('text');
   const [bboxFile, setBboxFile] = useState(null);
   const [bboxPreviewBoxes, setBboxPreviewBoxes] = useState([]);
+  const [segFile, setSegFile] = useState(null);
+  const [segPreviewPolygons, setSegPreviewPolygons] = useState([]);
 
   const {
     currentFile,
@@ -135,6 +138,41 @@ const SingleMode = () => {
     }
   };
 
+  const handleSegFileChange = async (file) => {
+    setSegFile(file);
+    if (!file) { setSegPreviewPolygons([]); return; }
+    if (!currentFile) {
+      addToast('Please upload an image first', 'error');
+      setSegPreviewPolygons([]);
+      return;
+    }
+    try {
+      const [content, imageSize] = await Promise.all([
+        file.text(),
+        loadImageSize(currentFile),
+      ]);
+      const polygons = [];
+      content.split(/\r?\n/).forEach((line, i) => {
+        const stripped = line.trim();
+        if (!stripped || stripped.startsWith('#')) return;
+        const parts = stripped.split(/\s+/);
+        if (parts.length < 7) throw new Error(`Line ${i + 1}: need class_id + at least 3 points`);
+        const coords = parts.slice(1).map(Number);
+        if (coords.length % 2 !== 0) throw new Error(`Line ${i + 1}: odd number of coordinates`);
+        const points = [];
+        for (let j = 0; j < coords.length; j += 2) {
+          points.push([coords[j] * imageSize.width, coords[j + 1] * imageSize.height]);
+        }
+        polygons.push({ label: parts[0], points });
+      });
+      setSegPreviewPolygons(polygons);
+      addToast(`Loaded ${polygons.length} YOLO seg polygons`, 'success');
+    } catch (error) {
+      setSegPreviewPolygons([]);
+      addToast(error.message || 'Failed to parse YOLO seg file', 'error');
+    }
+  };
+
   // Handle file selection
   const handleFileSelect = async (file) => {
     try {
@@ -204,6 +242,13 @@ const SingleMode = () => {
             confidenceThreshold
           );
           addToast(`Processed ${result.masks?.length || 0} bounding boxes`, 'success');
+        } else if (segmentationMode === 'seg-file') {
+          if (!segFile) {
+            addToast('Please choose a YOLO seg label file', 'error');
+            return;
+          }
+          result = await segmentImageWithSegFile(currentFileId, segFile);
+          addToast(`Loaded ${result.masks?.length || 0} segmentation masks`, 'success');
         } else {
           if (!textPrompt.trim()) {
             addToast('Please enter a text prompt', 'error');
@@ -449,6 +494,8 @@ const SingleMode = () => {
     setTextPrompt('');
     setBboxFile(null);
     setBboxPreviewBoxes([]);
+    setSegFile(null);
+    setSegPreviewPolygons([]);
     setSegmentationMode('text');
     // clearRefinementPoints();  // Disabled - Point tool removed
     clearHistory();
@@ -500,9 +547,8 @@ const SingleMode = () => {
     if (currentFileType === 'video') {
       return !textPrompt.trim();
     }
-    if (segmentationMode === 'bbox-file') {
-      return !bboxFile;
-    }
+    if (segmentationMode === 'bbox-file') return !bboxFile;
+    if (segmentationMode === 'seg-file') return !segFile;
     return !textPrompt.trim();
   })();
 
@@ -551,11 +597,40 @@ const SingleMode = () => {
                       >
                         YOLO BBox File
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => setSegmentationMode('seg-file')}
+                        className={`px-4 py-2 text-sm font-medium transition-colors ${
+                          segmentationMode === 'seg-file'
+                            ? 'bg-primary-600 text-white'
+                            : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300'
+                        }`}
+                      >
+                        YOLO Seg File
+                      </button>
                     </div>
                   </div>
                 )}
 
-                {currentFileType === 'image' && segmentationMode === 'bbox-file' ? (
+                {currentFileType === 'image' && segmentationMode === 'seg-file' ? (
+                  <div className="space-y-3">
+                    <input
+                      type="file"
+                      accept=".txt"
+                      onChange={(e) => handleSegFileChange(e.target.files?.[0] || null)}
+                      className="input"
+                      disabled={isLoading}
+                    />
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      YOLO seg format: <code>class_id x1 y1 x2 y2 x3 y3 ...</code> (normalized polygon points)
+                    </p>
+                    {segFile && (
+                      <p className="text-sm text-gray-700 dark:text-gray-300">
+                        Selected: <span className="font-medium">{segFile.name}</span>
+                      </p>
+                    )}
+                  </div>
+                ) : currentFileType === 'image' && segmentationMode === 'bbox-file' ? (
                   <div className="space-y-3">
                     <input
                       type="file"
@@ -607,8 +682,8 @@ const SingleMode = () => {
                       <>
                         <Sparkles size={18} />
                         <span>
-                          {currentFileType === 'image' && segmentationMode === 'bbox-file'
-                            ? 'Segment From BBox File'
+                          {segmentationMode === 'bbox-file' ? 'Segment From BBox File'
+                            : segmentationMode === 'seg-file' ? 'Load Seg Masks'
                             : 'Segment'}
                         </span>
                       </>
@@ -629,7 +704,8 @@ const SingleMode = () => {
                 <SegmentationCanvas
                   imageUrl={imagePreview}
                   masks={segmentationResult?.masks}
-                  previewBoxes={currentFileType === 'image' && segmentationMode === 'bbox-file' ? bboxPreviewBoxes : []}
+                  previewBoxes={segmentationMode === 'bbox-file' ? bboxPreviewBoxes : []}
+                  previewPolygons={segmentationMode === 'seg-file' ? segPreviewPolygons : []}
                   // onPointClick={handlePointClick}  // Disabled - Point tool removed
                   // onBoxDraw={handleBoxDraw}         // Disabled - Box tool removed
                   onBrushStroke={handleBrushStroke}

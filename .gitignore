@@ -156,3 +156,4 @@ README_TRAIN.md
 *.bpe
 *.vocab
 /sample_data
+/outputs

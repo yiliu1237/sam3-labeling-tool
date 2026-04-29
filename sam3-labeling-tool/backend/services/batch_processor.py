@@ -37,22 +37,20 @@ COLORS = [
 ]
 
 
-def _mask_to_yolo_seg(mask: np.ndarray, class_id: int, img_w: int, img_h: int) -> Optional[str]:
-    """Convert a binary mask to a YOLO segmentation line."""
+def _mask_to_yolo_seg(mask: np.ndarray, class_id: int, img_w: int, img_h: int) -> List[str]:
+    """Convert a binary mask to YOLO seg lines — one line per disconnected region."""
     mask_uint8 = (mask > 0).astype(np.uint8) * 255
     contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-    # Use the largest contour
-    contour = max(contours, key=cv2.contourArea)
-    if len(contour) < 3:
-        return None
-    points = contour.reshape(-1, 2)
-    # Normalize
-    norm = points / np.array([img_w, img_h], dtype=np.float32)
-    norm = np.clip(norm, 0.0, 1.0)
-    coords = ' '.join(f'{x:.6f} {y:.6f}' for x, y in norm)
-    return f'{class_id} {coords}'
+    lines = []
+    for contour in contours:
+        if len(contour) < 3 or cv2.contourArea(contour) < 10:
+            continue
+        points = contour.reshape(-1, 2)
+        norm = points / np.array([img_w, img_h], dtype=np.float32)
+        norm = np.clip(norm, 0.0, 1.0)
+        coords = ' '.join(f'{x:.6f} {y:.6f}' for x, y in norm)
+        lines.append(f'{class_id} {coords}')
+    return lines
 
 
 def _draw_overlay(image: Image.Image, masks: List[np.ndarray], alpha: float = 0.45) -> Image.Image:
@@ -118,15 +116,21 @@ class BatchProcessor:
         job = self.jobs[job_id]
         job['status'] = 'processing'
 
-        output_dir = Path(job['output_folder'])
-        masks_dir   = output_dir / 'masks'
-        overlays_dir = output_dir / 'overlays'
-        labels_dir  = output_dir / 'labels'
-        for d in (masks_dir, overlays_dir, labels_dir):
-            d.mkdir(parents=True, exist_ok=True)
+        try:
+            output_dir = Path(job['output_folder'])
+            masks_dir   = output_dir / 'masks'
+            overlays_dir = output_dir / 'overlays'
+            labels_dir  = output_dir / 'labels'
+            for d in (masks_dir, overlays_dir, labels_dir):
+                d.mkdir(parents=True, exist_ok=True)
 
-        sam3 = get_sam3_service()
-        use_boxes = bool(job['label_folder'])
+            sam3 = get_sam3_service()
+            use_boxes = bool(job['label_folder'])
+        except Exception as e:
+            job['status'] = 'failed'
+            job['error'] = str(e)
+            import traceback; traceback.print_exc()
+            return
 
         try:
             for file_idx, file_path in enumerate(job['files']):
@@ -202,9 +206,7 @@ class BatchProcessor:
                 # --- save YOLO seg txt ---
                 yolo_lines = []
                 for m, cid in zip(mask_arrays, class_ids):
-                    line = _mask_to_yolo_seg(m, cid, img_w, img_h)
-                    if line:
-                        yolo_lines.append(line)
+                    yolo_lines.extend(_mask_to_yolo_seg(m, cid, img_w, img_h))
                 if yolo_lines:
                     (labels_dir / f'{stem}.txt').write_text('\n'.join(yolo_lines) + '\n')
 

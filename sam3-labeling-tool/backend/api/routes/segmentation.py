@@ -30,6 +30,18 @@ from services.storage import get_storage_service
 router = APIRouter(prefix="/api/segment", tags=["segmentation"])
 
 
+@router.post("/upload-folder")
+async def upload_folder(files: List[UploadFile] = File(...), folder_name: str = Form("uploaded_folder")):
+    """Upload a local folder's files to a server temp directory. Returns the server path."""
+    storage = get_storage_service()
+    dest = storage.temp_path / folder_name
+    dest.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        content = await f.read()
+        (dest / Path(f.filename).name).write_bytes(content)
+    return {"folder_path": str(dest)}
+
+
 @router.get("/bbox-test", response_class=HTMLResponse, include_in_schema=False)
 async def bbox_test_page():
     """Minimal browser page for testing image upload + YOLO bbox-file segmentation."""
@@ -317,6 +329,75 @@ async def segment_image_with_box_file(
             status_code=500,
             detail=f"BBox file segmentation failed: {str(e)}",
         )
+
+
+@router.post("/image/seg-file", response_model=SegmentationResult)
+async def segment_image_with_seg_file(
+    image_id: str = Form(...),
+    seg_file: UploadFile = File(...),
+):
+    """
+    Rasterize a YOLO segmentation file (polygon points) into binary masks.
+    No SAM3 inference — the masks come directly from the polygon annotations.
+    """
+    try:
+        storage = get_storage_service()
+        image_path = storage.get_upload_path(image_id)
+        if not image_path:
+            raise HTTPException(status_code=404, detail=f"Image {image_id} not found")
+
+        image = Image.open(image_path).convert("RGB")
+        img_w, img_h = image.size
+
+        content = (await seg_file.read()).decode("utf-8")
+
+        masks, boxes, scores, labels = [], [], [], []
+
+        for line_num, line in enumerate(content.splitlines(), 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 7:  # class_id + at least 3 points (6 coords)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Line {line_num}: YOLO seg needs class_id + at least 3 x,y pairs"
+                )
+            class_id = parts[0]
+            coords = list(map(float, parts[1:]))
+            if len(coords) % 2 != 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Line {line_num}: odd number of coordinates"
+                )
+
+            # Denormalize polygon points
+            points = [
+                (int(coords[i] * img_w), int(coords[i + 1] * img_h))
+                for i in range(0, len(coords), 2)
+            ]
+
+            # Rasterize polygon to binary mask
+            mask_img = Image.new("L", (img_w, img_h), 0)
+            ImageDraw.Draw(mask_img).polygon(points, fill=255)
+            mask_arr = np.array(mask_img) // 255
+
+            # Compute bounding box from polygon
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+
+            masks.append(mask_arr.tolist())
+            boxes.append([float(x1), float(y1), float(x2), float(y2)])
+            scores.append(1.0)
+            labels.append(class_id)
+
+        return {"masks": masks, "boxes": boxes, "scores": scores, "labels": labels}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Seg file processing failed: {str(e)}")
 
 
 @router.post("/image/refine", response_model=SegmentationResult)

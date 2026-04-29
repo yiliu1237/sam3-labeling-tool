@@ -89,6 +89,22 @@ export const segmentVideoWithText = async (videoId, prompt, frameIndex = 0, conf
 };
 
 // Create batch job
+export const segmentImageWithSegFile = async (imageId, segFile) => {
+  const formData = new FormData();
+  formData.append('image_id', imageId);
+  formData.append('seg_file', segFile);
+  const response = await apiClient.post('/api/segment/image/seg-file', formData);
+  return response.data;
+};
+
+export const uploadFolder = async (files, folderName) => {
+  const formData = new FormData();
+  Array.from(files).forEach((f) => formData.append('files', f));
+  formData.append('folder_name', folderName);
+  const response = await apiClient.post('/api/segment/upload-folder', formData);
+  return response.data.folder_path;
+};
+
 export const createBatchJob = async (inputFolder, outputFolder, prompts, options = {}) => {
   const response = await apiClient.post('/api/batch/process', {
     input_folder: inputFolder,

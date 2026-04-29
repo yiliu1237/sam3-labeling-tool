@@ -6,6 +6,7 @@ const SegmentationCanvas = ({
   imageUrl,
   masks,
   previewBoxes = [],
+  previewPolygons = [],
   onPointClick,
   onBoxDraw,
   onBrushStroke
@@ -364,6 +365,30 @@ const SegmentationCanvas = ({
     ));
   };
 
+  const renderPreviewPolygons = () => {
+    if (!image || !previewPolygons || previewPolygons.length === 0) return null;
+
+    const scaleX = dimensions.width / image.width;
+    const scaleY = dimensions.height / image.height;
+    const colors = ['#ff4d4f', '#52c41a', '#1677ff', '#fa8c16', '#13c2c2', '#eb2f96'];
+
+    return previewPolygons.map((poly, idx) => {
+      const color = colors[idx % colors.length];
+      const scaledPoints = poly.points.flatMap(([x, y]) => [x * scaleX, y * scaleY]);
+      return (
+        <Line
+          key={`preview-poly-${idx}`}
+          points={scaledPoints}
+          closed
+          stroke={color}
+          strokeWidth={2}
+          dash={[8, 4]}
+          listening={false}
+        />
+      );
+    });
+  };
+
   const renderPreviewBoxes = () => {
     if (!image || !previewBoxes || previewBoxes.length === 0) return null;
 
@@ -431,6 +456,7 @@ const SegmentationCanvas = ({
             />
           )}
           {renderPreviewBoxes()}
+          {renderPreviewPolygons()}
           {renderMasks()}
           {renderPoints()}
           {drawingBox && (
