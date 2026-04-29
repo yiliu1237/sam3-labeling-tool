@@ -13,18 +13,15 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS middleware - allow frontend to connect
+# CORS middleware - configurable via CORS_ORIGINS env var (comma-separated)
+# Defaults to allow all origins so the app works out of the box on any server
+_cors_origins = os.environ.get("CORS_ORIGINS", "*")
+_allow_origins = [o.strip() for o in _cors_origins.split(",")] if _cors_origins != "*" else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:4173",
-        "http://127.0.0.1:4173",
-    ],
-    allow_credentials=True,
+    allow_origins=_allow_origins,
+    allow_credentials=_cors_origins != "*",
     allow_methods=["*"],
     allow_headers=["*"],
 )

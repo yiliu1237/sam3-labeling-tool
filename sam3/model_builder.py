@@ -55,7 +55,7 @@ def _setup_tf32() -> None:
 _setup_tf32()
 
 
-def _create_position_encoding(precompute_resolution=None):
+def _create_position_encoding(precompute_resolution=None, device="cpu"):
     """Create position encoding for visual backbone."""
     return PositionEmbeddingSine(
         num_pos_feats=256,
@@ -63,6 +63,7 @@ def _create_position_encoding(precompute_resolution=None):
         scale=None,
         temperature=10000,
         precompute_resolution=precompute_resolution,
+        device=device,
     )
 
 
@@ -327,7 +328,7 @@ def _create_sam3_model(
     return model
 
 
-def _create_tracker_maskmem_backbone():
+def _create_tracker_maskmem_backbone(device="cpu"):
     """Create the SAM3 Tracker memory encoder."""
     # Position encoding for mask memory backbone
     position_encoding = PositionEmbeddingSine(
@@ -336,6 +337,7 @@ def _create_tracker_maskmem_backbone():
         scale=None,
         temperature=10000,
         precompute_resolution=1008,
+        device=device,
     )
 
     # Mask processing components

@@ -217,8 +217,16 @@ class TransformerDecoder(nn.Module):
         separate_norm_instance: bool = False,
         resolution: Optional[int] = None,
         stride: Optional[int] = None,
+        device: Optional[str] = None,
     ):
         super().__init__()
+        if device is None:
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
         self.d_model = d_model
         self.layers = get_clones(layer, num_layers)
         self.fine_layers = (
@@ -278,7 +286,7 @@ class TransformerDecoder(nn.Module):
             if resolution is not None and stride is not None:
                 feat_size = resolution // stride
                 coords_h, coords_w = self._get_coords(
-                    feat_size, feat_size, device="cuda"
+                    feat_size, feat_size, device=device
                 )
                 self.compilable_cord_cache = (coords_h, coords_w)
                 self.compilable_stored_size = (feat_size, feat_size)

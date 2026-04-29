@@ -11,4 +11,4 @@ const windowApiUrl =
     ? window.__APP_API_URL__
     : undefined;
 
-export const API_BASE_URL = viteApiUrl || windowApiUrl || 'http://127.0.0.1:8000';
+export const API_BASE_URL = viteApiUrl || windowApiUrl || '';
